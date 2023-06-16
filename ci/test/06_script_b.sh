@@ -24,6 +24,11 @@ if [ "$RUN_FUZZ_TESTS" = "true" ]; then
   if [ ! -d "$DIR_FUZZ_IN" ]; then
     git clone --depth=1 https://github.com/bitcoin-core/qa-assets "${DIR_QA_ASSETS}"
   fi
+  (
+    cd "${DIR_QA_ASSETS}"
+    echo "Using qa-assets repo from commit ..."
+    git log -1
+  )
 elif [ "$RUN_UNIT_TESTS" = "true" ] || [ "$RUN_UNIT_TESTS_SEQUENTIAL" = "true" ]; then
   export DIR_UNIT_TEST_DATA=${DIR_QA_ASSETS}/unit_test_data/
   if [ ! -d "$DIR_UNIT_TEST_DATA" ]; then
@@ -62,7 +67,7 @@ if [ "$DOWNLOAD_PREVIOUS_RELEASES" = "true" ]; then
   test/get_previous_releases.py -b -t "$PREVIOUS_RELEASES_DIR"
 fi
 
-BITCOIN_CONFIG_ALL="--enable-suppress-external-warnings --disable-dependency-tracking"
+BITCOIN_CONFIG_ALL="--disable-dependency-tracking"
 if [ -z "$NO_DEPENDS" ]; then
   BITCOIN_CONFIG_ALL="${BITCOIN_CONFIG_ALL} CONFIG_SITE=$DEPENDS_DIR/$HOST/share/config.site"
 fi
@@ -100,14 +105,6 @@ make distdir VERSION="$HOST"
 cd "${BASE_BUILD_DIR}/bitcoin-$HOST"
 
 bash -c "./configure --cache-file=../config.cache $BITCOIN_CONFIG_ALL $BITCOIN_CONFIG" || ( (cat config.log) && false)
-
-if [[ ${USE_MEMORY_SANITIZER} == "true" ]]; then
-  # MemorySanitizer (MSAN) does not support tracking memory initialization done by
-  # using the Linux getrandom syscall. Avoid using getrandom by undefining
-  # HAVE_SYS_GETRANDOM. See https://github.com/google/sanitizers/issues/852 for
-  # details.
-  grep -v HAVE_SYS_GETRANDOM src/config/bitcoin-config.h > src/config/bitcoin-config.h.tmp && mv src/config/bitcoin-config.h.tmp src/config/bitcoin-config.h
-fi
 
 if [[ "${RUN_TIDY}" == "true" ]]; then
   MAYBE_BEAR="bear --config src/.bear-tidy-config"
@@ -158,22 +155,18 @@ if [ "${RUN_TIDY}" = "true" ]; then
   # accepted in src/.bear-tidy-config
   # Filter out:
   # * qt qrc and moc generated files
-  # * walletutil (temporarily)
   # * secp256k1
-  jq 'map(select(.file | test("src/qt/qrc_.*\\.cpp$|/moc_.*\\.cpp$|src/wallet/walletutil|src/secp256k1/src/") | not))' ../compile_commands.json > tmp.json
+  jq 'map(select(.file | test("src/qt/qrc_.*\\.cpp$|/moc_.*\\.cpp$|src/secp256k1/src/") | not))' ../compile_commands.json > tmp.json
   mv tmp.json ../compile_commands.json
   cd "${BASE_BUILD_DIR}/bitcoin-$HOST/"
   python3 "${DIR_IWYU}/include-what-you-use/iwyu_tool.py" \
            -p . "${MAKEJOBS}" \
            -- -Xiwyu --cxx17ns -Xiwyu --mapping_file="${BASE_BUILD_DIR}/bitcoin-$HOST/contrib/devtools/iwyu/bitcoin.core.imp" \
+           -Xiwyu --max_line_length=160 \
            2>&1 | tee /tmp/iwyu_ci.out
   cd "${BASE_ROOT_DIR}/src"
   python3 "${DIR_IWYU}/include-what-you-use/fix_includes.py" --nosafe_headers < /tmp/iwyu_ci.out
   git --no-pager diff
-fi
-
-if [ "$RUN_SECURITY_TESTS" = "true" ]; then
-  make test-security-check
 fi
 
 if [ "$RUN_FUZZ_TESTS" = "true" ]; then

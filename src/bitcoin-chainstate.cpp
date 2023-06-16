@@ -12,12 +12,11 @@
 // It is part of the libbitcoinkernel project.
 
 #include <kernel/chainparams.h>
+#include <kernel/chainstatemanager_opts.h>
 #include <kernel/checks.h>
 #include <kernel/context.h>
 #include <kernel/validation_cache_sizes.h>
 
-#include <chainparams.h>
-#include <common/args.h>
 #include <consensus/validation.h>
 #include <core_io.h>
 #include <node/blockstorage.h>
@@ -31,9 +30,12 @@
 #include <validationinterface.h>
 
 #include <cassert>
+#include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <iosfwd>
+#include <memory>
+#include <string>
 
 int main(int argc, char* argv[])
 {
@@ -49,18 +51,14 @@ int main(int argc, char* argv[])
     }
     std::filesystem::path abs_datadir = std::filesystem::absolute(argv[1]);
     std::filesystem::create_directories(abs_datadir);
-    gArgs.ForceSetArg("-datadir", abs_datadir.string());
 
 
-    // SETUP: Misc Globals
-    SelectParams(ChainType::MAIN);
-    auto chainparams = CChainParams::Main();
-
+    // SETUP: Context
     kernel::Context kernel_context{};
     // We can't use a goto here, but we can use an assert since none of the
     // things instantiated so far requires running the epilogue to be torn down
     // properly
-    assert(!kernel::SanityChecks(kernel_context).has_value());
+    assert(kernel::SanityChecks(kernel_context));
 
     // Necessary for CheckInputScripts (eventually called by ProcessNewBlock),
     // which will try the script cache first and fall back to actually
@@ -80,16 +78,40 @@ int main(int argc, char* argv[])
 
     GetMainSignals().RegisterBackgroundSignalScheduler(scheduler);
 
+    class KernelNotifications : public kernel::Notifications
+    {
+    public:
+        void blockTip(SynchronizationState, CBlockIndex&) override
+        {
+            std::cout << "Block tip changed" << std::endl;
+        }
+        void headerTip(SynchronizationState, int64_t height, int64_t timestamp, bool presync) override
+        {
+            std::cout << "Header tip changed: " << height << ", " << timestamp << ", " << presync << std::endl;
+        }
+        void progress(const bilingual_str& title, int progress_percent, bool resume_possible) override
+        {
+            std::cout << "Progress: " << title.original << ", " << progress_percent << ", " << resume_possible << std::endl;
+        }
+        void warning(const bilingual_str& warning) override
+        {
+            std::cout << "Warning: " << warning.original << std::endl;
+        }
+    };
+    auto notifications = std::make_unique<KernelNotifications>();
+
 
     // SETUP: Chainstate
+    auto chainparams = CChainParams::Main();
     const ChainstateManager::Options chainman_opts{
         .chainparams = *chainparams,
-        .datadir = gArgs.GetDataDirNet(),
+        .datadir = abs_datadir,
         .adjusted_time_callback = NodeClock::now,
+        .notifications = *notifications,
     };
     const node::BlockManager::Options blockman_opts{
         .chainparams = chainman_opts.chainparams,
-        .blocks_dir = gArgs.GetBlocksDirPath(),
+        .blocks_dir = abs_datadir / "blocks",
     };
     ChainstateManager chainman{chainman_opts, blockman_opts};
 
@@ -122,7 +144,8 @@ int main(int argc, char* argv[])
     // Main program logic starts here
     std::cout
         << "Hello! I'm going to print out some information about your datadir." << std::endl
-        << "\t" << "Path: " << gArgs.GetDataDirNet() << std::endl;
+        << "\t"
+        << "Path: " << abs_datadir << std::endl;
     {
         LOCK(chainman.GetMutex());
         std::cout
